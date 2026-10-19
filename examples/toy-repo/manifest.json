@@ -1,0 +1,10 @@
+{
+  "branches": [
+    {"name": "real-fix", "title": "Real fix", "rank": true},
+    {"name": "slop-passes-before", "title": "Tests already pass on main", "rank": false},
+    {"name": "slop-tautology", "title": "Pretty write-up, tests do not constrain the fix", "rank": true},
+    {"name": "slop-scope", "title": "Fix plus an unrelated dump", "rank": true},
+    {"name": "slop-broken", "title": "Does not compile", "rank": false},
+    {"name": "slop-false-claims", "title": "Description does not match the diff", "rank": true}
+  ]
+}
