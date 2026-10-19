@@ -1,0 +1,301 @@
+// Package scope scores changes that are unrelated to the tests being added:
+// extra files, new dependencies, formatting sweeps, and generated boilerplate.
+package scope
+
+import (
+	"encoding/json"
+	"fmt"
+	"path/filepath"
+	"regexp"
+	"strings"
+
+	"github.com/zysen1/Proofline/internal/model"
+)
+
+const (
+	FailRatio   = 0.45
+	WarnRatio   = 0.25
+	FormatMin   = 20
+	FormatRatio = 0.60
+	BoilerMin   = 20
+	BoilerRatio = 0.50
+)
+
+// File is one changed path plus the bytes the heuristic needs.
+type File struct {
+	Path       string
+	Kind       string
+	Added      int
+	Deleted    int
+	BaseSource string
+	HeadSource string
+	Patch      string
+}
+
+// Evaluate scores scope creep. Test files and .proofline metadata are related.
+// A source file is related when a changed test mentions its basename or the PR body names the path.
+func Evaluate(files []File, prBody string, testBodies []string) model.Check {
+	var reasons []string
+	var evidence []model.Evidence
+
+	total := 0
+	unrelated := 0
+	formatLines := 0
+	boilerAdded := 0
+	addedTotal := 0
+	var deps []string
+
+	bodyLower := strings.ToLower(prBody)
+
+	for _, f := range files {
+		lines := f.Added + f.Deleted
+		if lines < 0 {
+			lines = 0
+		}
+		total += lines
+		addedTotal += f.Added
+		boilerAdded += boilerplateCount(f.Patch)
+
+		if f.Kind == "manifest" {
+			deps = append(deps, newDependencies(f)...)
+		}
+
+		if isRelated(f, bodyLower, testBodies) {
+			if formattingOnly(f) {
+				formatLines += lines
+			}
+			continue
+		}
+		unrelated += lines
+		if formattingOnly(f) {
+			formatLines += lines
+		}
+		evidence = append(evidence, model.Evidence{
+			Detail: f.Path + " is not referenced by the new tests or the PR description",
+		})
+	}
+
+	var unmentioned []string
+	for _, d := range unique(deps) {
+		if !strings.Contains(bodyLower, strings.ToLower(d)) {
+			unmentioned = append(unmentioned, d)
+		}
+	}
+	if len(unmentioned) > 0 {
+		reasons = append(reasons, "new dependencies not named in the description: "+strings.Join(unmentioned, ", "))
+		evidence = append(evidence, model.Evidence{Detail: "unmentioned deps: " + strings.Join(unmentioned, ", ")})
+	}
+
+	ratio := 0.0
+	if total > 0 {
+		ratio = float64(unrelated) / float64(total)
+	}
+	if ratio >= FailRatio {
+		reasons = append(reasons, pct("unrelated lines", unrelated, total))
+	}
+	if formatLines >= FormatMin && total > 0 && float64(formatLines)/float64(total) >= FormatRatio {
+		reasons = append(reasons, pct("formatting-only lines", formatLines, total))
+	}
+	if boilerAdded >= BoilerMin && addedTotal > 0 && float64(boilerAdded)/float64(addedTotal) >= BoilerRatio {
+		reasons = append(reasons, pct("generated boilerplate lines", boilerAdded, addedTotal))
+	}
+
+	if len(reasons) > 0 {
+		return model.Check{
+			ID:       "scope",
+			Name:     "Scope stays on the claimed fix",
+			Status:   model.StatusFail,
+			Summary:  strings.Join(reasons, "; ") + ".",
+			Evidence: trimEvidence(evidence, 12),
+		}
+	}
+	if ratio >= WarnRatio {
+		return model.Check{
+			ID:       "scope",
+			Name:     "Scope stays on the claimed fix",
+			Status:   model.StatusWarn,
+			Summary:  pct("unrelated lines", unrelated, total) + ".",
+			Evidence: trimEvidence(evidence, 12),
+		}
+	}
+	return model.Check{
+		ID:      "scope",
+		Name:    "Scope stays on the claimed fix",
+		Status:  model.StatusPass,
+		Summary: "Changed lines stay on the tested code. No unmentioned dependency, formatting sweep, or boilerplate dump.",
+	}
+}
+
+func isRelated(f File, bodyLower string, tests []string) bool {
+	switch f.Kind {
+	case "test", "meta":
+		return true
+	case "manifest":
+		// Manifests are related only when every new dependency is named.
+		// Unmentioned deps are reported separately; the file's lines still
+		// count as unrelated so a drive-by requirements.txt is visible.
+		deps := newDependencies(f)
+		if len(deps) == 0 {
+			return true
+		}
+		for _, d := range deps {
+			if !strings.Contains(bodyLower, strings.ToLower(d)) {
+				return false
+			}
+		}
+		return true
+	}
+	p := strings.ToLower(filepath.ToSlash(f.Path))
+	if strings.Contains(bodyLower, p) || strings.Contains(bodyLower, strings.ToLower(filepath.Base(f.Path))) {
+		return true
+	}
+	base := strings.TrimSuffix(filepath.Base(f.Path), filepath.Ext(f.Path))
+	if len(base) < 2 {
+		return false
+	}
+	for _, t := range tests {
+		if strings.Contains(t, base) {
+			return true
+		}
+	}
+	return false
+}
+
+func formattingOnly(f File) bool {
+	if f.BaseSource == "" || f.HeadSource == "" {
+		return false
+	}
+	if f.BaseSource == f.HeadSource {
+		return false
+	}
+	return normalize(f.BaseSource) == normalize(f.HeadSource)
+}
+
+func normalize(s string) string {
+	var lines []string
+	for _, l := range strings.Split(s, "\n") {
+		t := strings.TrimSpace(l)
+		if t != "" {
+			lines = append(lines, t)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+var boilerRe = regexp.MustCompile(`(?i)(copyright|all rights reserved|generated by|do not edit|spdx-license|lorem ipsum|auto-generated|autogenerated)`)
+
+func boilerplateCount(patch string) int {
+	n := 0
+	for _, line := range strings.Split(patch, "\n") {
+		if !strings.HasPrefix(line, "+") || strings.HasPrefix(line, "+++") {
+			continue
+		}
+		if boilerRe.MatchString(line) {
+			n++
+		}
+	}
+	return n
+}
+
+var reqLine = regexp.MustCompile(`^\+([A-Za-z0-9_.-]+)`)
+var goReq = regexp.MustCompile(`^\+\s*([A-Za-z0-9_./-]+)\s+v[0-9]`)
+
+func newDependencies(f File) []string {
+	base := strings.ToLower(filepath.Base(f.Path))
+	switch base {
+	case "requirements.txt", "requirements-dev.txt":
+		var out []string
+		for _, line := range strings.Split(f.Patch, "\n") {
+			if !strings.HasPrefix(line, "+") || strings.HasPrefix(line, "+++") {
+				continue
+			}
+			body := strings.TrimSpace(strings.TrimPrefix(line, "+"))
+			if body == "" || strings.HasPrefix(body, "#") {
+				continue
+			}
+			m := reqLine.FindStringSubmatch("+" + body)
+			if m == nil {
+				continue
+			}
+			name := m[1]
+			if strings.EqualFold(name, "pytest") || name == "-r" || name == "--requirement" {
+				continue
+			}
+			out = append(out, name)
+		}
+		return out
+	case "package.json":
+		return packageJSONDeps(f.BaseSource, f.HeadSource)
+	case "go.mod":
+		var out []string
+		for _, line := range strings.Split(f.Patch, "\n") {
+			m := goReq.FindStringSubmatch(line)
+			if m != nil {
+				out = append(out, m[1])
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func packageJSONDeps(base, head string) []string {
+	before := depNames(base)
+	after := depNames(head)
+	var out []string
+	for name := range after {
+		if !before[name] {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+func depNames(src string) map[string]bool {
+	out := map[string]bool{}
+	if strings.TrimSpace(src) == "" {
+		return out
+	}
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(src), &doc); err != nil {
+		return out
+	}
+	for _, key := range []string{"dependencies", "devDependencies", "optionalDependencies"} {
+		raw, ok := doc[key].(map[string]any)
+		if !ok {
+			continue
+		}
+		for name := range raw {
+			out[name] = true
+		}
+	}
+	return out
+}
+
+func pct(label string, n, d int) string {
+	if d == 0 {
+		return label
+	}
+	return fmt.Sprintf("%s %d/%d (%.0f%%)", label, n, d, 100*float64(n)/float64(d))
+}
+
+func unique(in []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, s := range in {
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
+}
+
+func trimEvidence(in []model.Evidence, n int) []model.Evidence {
+	if len(in) <= n {
+		return in
+	}
+	return in[:n]
+}

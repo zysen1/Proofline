@@ -1,0 +1,49 @@
+name: Proofline
+description: Verify a pull request with deterministic execution evidence and post a proof receipt.
+author: Proofline contributors
+branding:
+  icon: check-circle
+  color: green
+inputs:
+  base:
+    description: Base git ref
+    required: false
+    default: main
+  head:
+    description: Head git ref
+    required: false
+    default: HEAD
+  reruns:
+    description: How many times to rerun fail-before and pass-after
+    required: false
+    default: "3"
+  max-mutants:
+    description: Cap on mutation sites
+    required: false
+    default: "12"
+  pr-body:
+    description: Pull request description. Empty reads .proofline/pr.md on the head ref.
+    required: false
+    default: ""
+  comment:
+    description: Post the receipt as a pull request comment
+    required: false
+    default: "true"
+  token:
+    description: GitHub token used to post the comment
+    required: false
+    default: ""
+  pr:
+    description: Pull request number. Defaults to the event payload.
+    required: false
+    default: ""
+  llm-summary:
+    description: Add a prose summary. This does not affect the verdict.
+    required: false
+    default: "false"
+outputs:
+  verdict:
+    description: Verified, Partially, Unverified, or Not applicable
+runs:
+  using: docker
+  image: Dockerfile
